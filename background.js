@@ -24,6 +24,41 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function triggerShowShortcut(tabId) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      func: () => {
+        try {
+          const info = { frameUrl: window.location.href, hasFocus: document.hasFocus(), routePresent: typeof window.route === "function" };
+          if (!document.hasFocus()) return;
+          const ae = document.activeElement;
+          const tag = ae && ae.tagName;
+          const isEditable =
+            (ae && ae.isContentEditable) ||
+            tag === "INPUT" ||
+            tag === "TEXTAREA" ||
+            tag === "SELECT";
+          if (isEditable) return;
+          // Debug: log which frame handled the fallback
+          try {
+            console.log("[triggerShowShortcut] in frame:", info);
+          } catch (_) {}
+          if (typeof window.route === "function") {
+            window.route({ action: "show_overlays" });
+          } else {
+            const evt = new KeyboardEvent("keydown", { key: "s", bubbles: true });
+            document.dispatchEvent(evt);
+            window.dispatchEvent(evt);
+          }
+        } catch (_) {}
+      },
+    });
+  } catch (err) {
+    console.warn("[agent] triggerShowShortcut failed:", err?.message || err);
+  }
+}
+
 async function handleTextCommand(rawText) {
   const text = (rawText || "").trim();
   if (!text) return;
@@ -507,6 +542,7 @@ async function runAgentBaseline({ goalText, agentTabId, agentWindowId, state }) 
     }
     if (!observation.elements || observation.elements.length <= 3) {
       console.warn("[agent] Low candidate count (<=3); re-observing once");
+      await triggerShowShortcut(agentTabId);
       const retryObs = await observeTab({
         tabId: agentTabId,
         windowId: agentWindowId,
