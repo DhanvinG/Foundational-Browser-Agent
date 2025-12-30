@@ -9,7 +9,10 @@
   const AGENT_PANEL_ID = "cora-agent-panel";
   const MIC_TOGGLE_ID = "cora-mic-toggle";
   const VOICE_STATUS_ID = "cora-voice-status";
+  const VOICE_PREVIEW_ID = "cora-voice-preview";
+  const IDLE_STOP_MS = 1300;
   let micToggleButton = null;
+  let idleStopTimer = null;
 
   /************  UI BAR  ************/
   // Command bar removed – we now use global keyboard shortcuts (s / h / digits + y)
@@ -27,23 +30,6 @@
       candidates = [];
       overlayDescriptors = [];
     }
-  }
-
-  function queryAllDeep(root, selector) {
-    const results = [];
-    try {
-      const localMatches = root.querySelectorAll(selector);
-      results.push(...localMatches);
-      const shadowHosts = root.querySelectorAll("*");
-      shadowHosts.forEach((el) => {
-        if (el.shadowRoot) {
-          results.push(...queryAllDeep(el.shadowRoot, selector));
-        }
-      });
-    } catch (_) {
-      /* ignore shadow errors */
-    }
-    return results;
   }
 
   function showOverlays() {
@@ -77,7 +63,7 @@
     `
       : "";
 
-    const elements = queryAllDeep(document, baseSelector + docsExtra);
+    const elements = document.querySelectorAll(baseSelector + docsExtra);
 
     [...elements].forEach((el, idx) => {
       const rect = el.getBoundingClientRect();
@@ -563,6 +549,24 @@
     `;
     panel.appendChild(voiceStatus);
 
+    const voicePreview = document.createElement("div");
+    voicePreview.id = VOICE_PREVIEW_ID;
+    voicePreview.textContent = "Transcript: (none yet)";
+    voicePreview.style.cssText = `
+      margin-top: 6px;
+      font-size: 12px;
+      color: #fff;
+      word-break: break-word;
+      white-space: pre-wrap;
+      max-height: 120px;
+      overflow-y: auto;
+      border: 1px solid #333;
+      padding: 6px;
+      border-radius: 4px;
+      background: rgba(255,255,255,0.05);
+    `;
+    panel.appendChild(voicePreview);
+
     startBtn.addEventListener("click", () => {
       const mode = panel.dataset.mode || "start";
       const text = textarea.value.trim();
@@ -633,6 +637,9 @@
       textarea.readOnly = false;
       textarea.focus();
     }
+    // Auto-start mic to capture the reply without manual start.
+    startVoice().catch((err) => console.warn("[voice] auto start mic failed:", err?.message || err));
+    setVoiceStatus("Listening for your answer...");
   }
 
   function showSummaryPanel(summaryText) {
@@ -852,6 +859,12 @@ User: google cnn.com
   /************  AGENT MESSAGE HANDLERS (top frame only) ************/
   chrome.runtime?.onMessage?.addListener((msg, sender, sendResponse) => {
     if (!msg || !msg.type) return;
+    if (!IS_TOP) return;
+
+    if (msg.type === "PING") {
+      sendResponse({ success: true });
+      return;
+    }
 
     if (msg.type === "OBSERVE_SHOW") {
       showOverlays();
@@ -863,13 +876,6 @@ User: google cnn.com
     if (msg.type === "OBSERVE_HIDE") {
       clearOverlays({ preserveCandidates: true });
       sendResponse({ success: true, info: "Overlays hidden" });
-      return;
-    }
-
-    if (!IS_TOP) return;
-
-    if (msg.type === "PING") {
-      sendResponse({ success: true });
       return;
     }
 
@@ -913,7 +919,7 @@ User: google cnn.com
     const key = e.key.toLowerCase();
 
     // Ctrl/Cmd + Shift + P => toggle agent panel
-    if (e.shiftKey && (e.metaKey || e.ctrlKey) && key === "p") {
+    if (e.shiftKey && (e.metaKey || e.ctrlKey) && key === "l") {
       e.preventDefault();
       const panel = document.getElementById(AGENT_PANEL_ID);
       if (panel && panel.style.display === "block") {
@@ -1029,6 +1035,34 @@ User: google cnn.com
     el.textContent = text || "";
   }
 
+  function ensureVoicePreview() {
+    const panel = ensureAgentPanel();
+    const found = panel.querySelector(`#${VOICE_PREVIEW_ID}`);
+    return found || null;
+  }
+
+  function setVoicePreview(text) {
+    const el = ensureVoicePreview();
+    if (!el) return;
+    el.textContent = text ? `Transcript: ${text}` : "Transcript: (none yet)";
+  }
+
+  function clearIdleStopTimer() {
+    if (idleStopTimer) {
+      clearTimeout(idleStopTimer);
+      idleStopTimer = null;
+    }
+  }
+
+  function armIdleStopTimer() {
+    clearIdleStopTimer();
+    idleStopTimer = setTimeout(() => {
+      if (!voiceActive || !voiceWs || voiceWs.readyState !== WebSocket.OPEN) return;
+      setVoiceStatus("Sending...");
+      stopVoice();
+    }, IDLE_STOP_MS);
+  }
+
   function autoSubmitTranscript(rawText) {
     const text = (rawText || "").trim();
     const panel = ensureAgentPanel();
@@ -1041,8 +1075,8 @@ User: google cnn.com
       return;
     }
 
-    // Do not auto-send; let the user press Submit manually.
-    setVoiceStatus(mode === "question" ? "Transcript ready. Press Submit to reply." : "Transcript ready. Press Submit to send.");
+    // Text captured; status will be updated by the sender path.
+    setVoiceStatus(mode === "question" ? "Transcript captured (replying...)" : "Transcript captured (sending...)");
   }
 
   async function startVoice() {
@@ -1051,10 +1085,12 @@ User: google cnn.com
       setVoiceStatus("Voice already active");
       return;
     }
+    clearIdleStopTimer();
     stopRequested = false;
     voiceActive = true;
     setMicButtonState(true);
     setVoiceStatus("Connecting mic...");
+    setVoicePreview("");
     try {
       voiceWs = new WebSocket(VOICE_WS_URL);
     } catch (err) {
@@ -1071,11 +1107,33 @@ User: google cnn.com
         if (msg.type === "partial") {
           console.log("[voice] partial:", msg.text);
           setVoiceStatus(`Listening: ${msg.text}`);
+          setVoicePreview(msg.text);
+          armIdleStopTimer();
         } 
         else if (msg.type === "final") {
           console.log("[voice] final:", msg.text);
+          clearIdleStopTimer();
           setVoiceStatus(`Final: ${msg.text}`);
+          setVoicePreview(msg.text);
           autoSubmitTranscript(msg.text);
+
+          // Auto-send the final transcript to background without requiring Submit.
+          const panel = ensureAgentPanel();
+          const mode = panel?.dataset?.mode || "start";
+          const finalText = (msg.text || "").trim();
+          if (finalText) {
+            if (mode === "question") {
+              console.log("[voice] auto-send USER_REPLY:", finalText);
+              chrome.runtime?.sendMessage?.({ type: "USER_REPLY", reply: finalText });
+              setVoiceStatus("Reply sent automatically.");
+            } else {
+              console.log("[voice] auto-send TEXT_COMMAND:", finalText);
+              chrome.runtime?.sendMessage?.({ type: "TEXT_COMMAND", text: finalText });
+              setVoiceStatus("Command sent automatically.");
+            }
+            hideAgentPanel();
+          }
+
           if (stopRequested) {
             stopRequested = false;
             if (stopForceCloseTimer) {
@@ -1105,6 +1163,7 @@ User: google cnn.com
 
     voiceWs.onclose = (e) => {
       console.log("[voice] ws close", e?.code, e?.reason);
+      clearIdleStopTimer();
       stopRecording();
       voiceWs = null;
       voiceActive = false;
@@ -1114,6 +1173,7 @@ User: google cnn.com
 
     voiceWs.onerror = (e) => {
       console.log("[voice] ws error", e);
+      clearIdleStopTimer();
       voiceActive = false;
       setMicButtonState(false);
       setVoiceStatus("WS error");
@@ -1123,6 +1183,7 @@ User: google cnn.com
 
   function stopVoice() {
     console.log("[voice] stopVoice clicked");
+    clearIdleStopTimer();
     stopRequested = true;
     voiceActive = false;
     setMicButtonState(false);

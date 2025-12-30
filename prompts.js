@@ -97,7 +97,10 @@ DECISION RULES (FOLLOW EXACTLY)
   - Do NOT ask questions in this MVP.
 
 - DONE RULE:
-  - Output done ONLY when the user’s request is completed (not just started).
+  - Output done ONLY when the user's request is completed (not just started).
+  - Completion: if you have already achieved the user's goal, immediately return { "action":"done", "value": null } instead of taking more actions.
+  - Stop after completion: once the goal is satisfied, do NOT keep scrolling or clicking additional results; return done.
+  - ACTION_HISTORY IS AUTHORITATIVE: Treat the listed actions as already completed. Do NOT redo prior steps (e.g., re-search or re-click) if action_history shows they were done. If the completed actions satisfy the goal, return done.
 
 FAIL-SAFE WHEN STUCK
 - If you cannot identify a clear correct target but scrolling may reveal it, output:

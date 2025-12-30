@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "Clickable Overlay Assistant",
-  "version": "1.2",
+  "version": "1.1",
   "description": "Label and click buttons with ease",
-  "permissions": ["activeTab", "tabs", "scripting", "sessions", "webNavigation"],
+  "permissions": ["activeTab", "tabs", "scripting", "sessions"],
   "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background.js"
@@ -13,9 +13,7 @@
       "matches": ["<all_urls>"],
       "js": ["content.js"],
       "run_at": "document_idle",
-      "all_frames": true,
-      "match_about_blank": true,
-      "match_origin_as_fallback": true
+      "all_frames": true         
     }
   ],
   "icons": {

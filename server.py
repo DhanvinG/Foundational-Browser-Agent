@@ -506,8 +506,10 @@ async def realtime_proxy(ws: WebSocket):
                 "format": {"type": "audio/pcm", "rate": 24000},
                 "transcription": {"model": "gpt-4o-transcribe", "language": "en"},
                 "turn_detection": {
-                    "type": "server_vad"
-                }
+                    "type": "server_vad",
+                    "silence_duration_ms": 1300,
+                    "threshold": 0.5
+                },
             }
             }
         }

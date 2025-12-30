@@ -512,7 +512,7 @@ async function runAgentBaseline({ goalText, agentTabId, agentWindowId, state }) 
         windowId: agentWindowId,
         url: currentTab.url,
         title: currentTab.title,
-        waitMs: 100,
+        waitMs: 6000,
       });
       if (!retryObs || !retryObs.elements || retryObs.elements.length <= 3) {
         console.warn("[agent] No sufficient overlays after re-observe; stopping");
@@ -1082,7 +1082,7 @@ async function executeAction(tabId, action, value, actionHistory, elements, curr
       actionHistory?.push(formatActionHistoryEntry(action, value, "switched tab", true));
       console.log("[agent] Switched tab:", value);
       updateRecentState(tabId, action, value);
-      return true;
+      return { ok: true, info: "switched tab" };
     }
 
     if (action === "open_url") {
@@ -1091,7 +1091,7 @@ async function executeAction(tabId, action, value, actionHistory, elements, curr
       actionHistory?.push(formatActionHistoryEntry(action, value, "navigated", true));
       console.log("[agent] Navigated to URL:", value);
       updateRecentState(tabId, action, value);
-      return true;
+      return { ok: true, info: "navigated" };
     }
 
     if (action === "search") {
@@ -1104,7 +1104,7 @@ async function executeAction(tabId, action, value, actionHistory, elements, curr
       actionHistory?.push(formatActionHistoryEntry(action, value, "searched", true));
       console.log("[agent] Searched:", query);
       updateRecentState(tabId, action, value);
-      return true;
+      return { ok: true, info: "searched" };
     }
 
     if (["click_index", "type_text", "select_type", "scroll"].includes(action)) {
@@ -1155,6 +1155,18 @@ async function executeAction(tabId, action, value, actionHistory, elements, curr
       }
       updateRecentState(tabId, action, value);
       return { ok: true };
+    }
+
+    if (action === "ask_user") {
+      const reply = await promptUser(value, tabId);
+      if (!reply) {
+        console.warn("[agent] ask_user had no reply; stopping");
+        return { ok: false, error: "user_no_reply" };
+      }
+      actionHistory?.push(formatActionHistoryEntry(action, value, `user_reply:${reply.slice(0, 80)}`, true));
+      state.lastUserReply = reply;
+      updateRecentState(tabId, action, value);
+      return { ok: true, info: "user_reply_captured" };
     }
 
     console.warn("[agent] Unsupported action:", action);
