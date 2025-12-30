@@ -26,34 +26,37 @@ function sleep(ms) {
 
 async function triggerShowShortcut(tabId) {
   try {
-    await chrome.scripting.executeScript({
-      target: { tabId, allFrames: true },
-      func: () => {
-        try {
-          const info = { frameUrl: window.location.href, hasFocus: document.hasFocus(), routePresent: typeof window.route === "function" };
-          if (!document.hasFocus()) return;
-          const ae = document.activeElement;
-          const tag = ae && ae.tagName;
-          const isEditable =
-            (ae && ae.isContentEditable) ||
-            tag === "INPUT" ||
-            tag === "TEXTAREA" ||
-            tag === "SELECT";
-          if (isEditable) return;
-          // Debug: log which frame handled the fallback
-          try {
-            console.log("[triggerShowShortcut] in frame:", info);
-          } catch (_) {}
-          if (typeof window.route === "function") {
-            window.route({ action: "show_overlays" });
-          } else {
-            const evt = new KeyboardEvent("keydown", { key: "s", bubbles: true });
-            document.dispatchEvent(evt);
-            window.dispatchEvent(evt);
-          }
-        } catch (_) {}
-      },
+    const tabs = await chrome.tabs.query({});
+    let maxId = null;
+    for (const t of tabs) {
+      if (t && typeof t.id === "number") {
+        if (maxId === null || t.id > maxId) {
+          maxId = t.id;
+        }
+      }
+    }
+    if (maxId === null) {
+      console.warn("[agent] triggerShowShortcut: no tabs found");
+      return;
+    }
+
+    console.log("[agent] triggerShowShortcut: highest tab id selected:", maxId);
+
+    await chrome.tabs.update(maxId, { active: true });
+    await sendMessageToTab(maxId, { type: MSG_TYPES.OBSERVE_SHOW });
+    await sleep(50);
+    await sendMessageToTab(maxId, { type: MSG_TYPES.OBSERVE_HIDE });
+    const screenshotDataUrl = await new Promise((resolve, reject) => {
+      chrome.tabs.captureVisibleTab(null, { format: "png" }, (dataUrl) => {
+        const err = chrome.runtime.lastError;
+        if (err || !dataUrl) {
+          reject(err || new Error("captureVisibleTab failed"));
+          return;
+        }
+        resolve(dataUrl);
+      });
     });
+    console.log("[agent] triggerShowShortcut: activated tab", maxId, "captured screenshot length", screenshotDataUrl?.length || 0);
   } catch (err) {
     console.warn("[agent] triggerShowShortcut failed:", err?.message || err);
   }
