@@ -125,7 +125,8 @@ self.requestAgentStep = async function requestAgentStep({
   title,
   actionHistory,
   elements,
-  userReply
+  userReply,
+  userProfile
 }) {
   const payload = {
     controllerPrompt: self.CONTROLLER_PROMPT,
@@ -136,7 +137,8 @@ self.requestAgentStep = async function requestAgentStep({
       title: title || "",
       actionHistory: Array.isArray(actionHistory) ? actionHistory : [],
       elements: Array.isArray(elements) ? elements : [],
-      userReply: userReply || ""
+      userReply: userReply || "",
+      userProfile: userProfile || null
     }
   };
 

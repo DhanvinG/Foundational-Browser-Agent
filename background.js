@@ -20,32 +20,150 @@ const INTENT_ENDPOINT = "http://localhost:8000/intent"; // simple command intent
 
 // TODO: Stage 2 - wire wake-word/ASR via offscreen page when ready.
 
+// Simple personalization profile used to auto-fill forms/emails.
+const USER_PROFILE = {
+  name: "Alex Chen",
+  email: "alex.chen.dev@gmail.com",
+  phone: "+1-415-867-3921",
+  role: "Software Engineer",
+  company: "Stripe",
+  school: "University of California, Berkeley",
+  skills: [
+    "JavaScript",
+    "TypeScript",
+    "React",
+    "Node.js",
+    "Python",
+    "AI Agents",
+    "Distributed Systems"
+  ],
+  bio: "Software engineer focused on building scalable, user-centered products at the intersection of AI and web platforms. Passionate about clean system design, low-latency experiences, and turning complex workflows into intuitive tools. Always experimenting, shipping, and iterating."
+};
+
+const SMALL_LLM_API_KEY = null; // set to your OpenAI API key if desired
+const SMALL_LLM_MODEL = "gpt-4o-mini";
+const PROFILE_ANSWER_ENDPOINT = "http://localhost:8000/profile-answer";
+const TTS_ENDPOINT = "http://localhost:8000/tts";
+const TTS_VOICE = "marin";
+
+function answerFromProfile(question = "") {
+  const q = (question || "").toLowerCase();
+  const fields = [
+    { key: "name", aliases: ["name"] },
+    { key: "email", aliases: ["email", "e-mail"] },
+    { key: "phone", aliases: ["phone", "phone number", "mobile"] },
+    { key: "role", aliases: ["role", "title", "job title", "position"] },
+    { key: "company", aliases: ["company", "employer", "organization"] },
+    { key: "school", aliases: ["school", "university", "college"] },
+    { key: "bio", aliases: ["bio", "background"] },
+    { key: "skills", aliases: ["skills", "skillset"] },
+  ];
+
+  for (const f of fields) {
+    const val = USER_PROFILE[f.key];
+    if (!val || (Array.isArray(val) && val.length === 0)) continue;
+    for (const alias of f.aliases) {
+      if (q.includes(alias)) {
+        if (Array.isArray(val)) {
+          return val.join(", ");
+        }
+        return String(val);
+      }
+    }
+  }
+  return null;
+}
+
+// Non-streaming TTS: fetch a data URL and return it.
+async function speakText(text = "") {
+  if (!text) return null;
+  try {
+    const res = await fetch(TTS_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, voice: TTS_VOICE }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const audioUrl = data && data.audio;
+    return typeof audioUrl === "string" ? audioUrl : null;
+  } catch (err) {
+    console.warn("[tts] failed:", err?.message || err);
+    return null;
+  }
+}
+
+function normalizeQuestionKey(q = "") {
+  return q.toLowerCase().trim();
+}
+
+async function askSmallProfileLLM(question = "") {
+  try {
+    const res = await fetch(PROFILE_ANSWER_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question: question || "", user_profile: USER_PROFILE }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const ans = data && data.answer;
+    if (typeof ans !== "string") return null;
+    return ans.trim();
+  } catch (err) {
+    console.warn("[profile-llm] failed:", err?.message || err);
+    return null;
+  }
+}
+
+async function autoAnswerAskUser(question = "", askCache = null) {
+  const key = normalizeQuestionKey(question);
+  if (askCache && askCache[key]) return askCache[key];
+
+  const auto = await askSmallProfileLLM(question || "");
+  if (auto) {
+    const upper = auto.toUpperCase().trim();
+    if (upper !== "UNKNOWN") {
+      if (askCache) askCache[key] = auto;
+      return auto;
+    }
+  }
+
+  return null;
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function triggerShowShortcut(tabId) {
   try {
+    let targetTabId = null;
     const tabs = await chrome.tabs.query({});
-    let maxId = null;
+    let highestId = null;
     for (const t of tabs) {
       if (t && typeof t.id === "number") {
-        if (maxId === null || t.id > maxId) {
-          maxId = t.id;
+        if (highestId === null || t.id > highestId) {
+          highestId = t.id;
         }
       }
     }
-    if (maxId === null) {
+    // Always target the highest tab id, regardless of the provided tabId.
+    targetTabId = highestId;
+    console.log("[agent] triggerShowShortcut: highest tab id:", highestId, "targeting tab id:", targetTabId);
+    if (targetTabId === null) {
       console.warn("[agent] triggerShowShortcut: no tabs found");
-      return;
+      return null;
     }
 
-    console.log("[agent] triggerShowShortcut: highest tab id selected:", maxId);
+    console.log("[agent] triggerShowShortcut: targeting tab id:", targetTabId);
 
-    await chrome.tabs.update(maxId, { active: true });
-    await sendMessageToTab(maxId, { type: MSG_TYPES.OBSERVE_SHOW });
+    await chrome.tabs.update(targetTabId, { active: true });
+    const frameId = await getBestFrameId(targetTabId);
+    console.log("[agent] triggerShowShortcut: targeting frame", frameId);
+    console.log("[agent] triggerShowShortcut chose frame id:", frameId);
+    const showResult = await sendMessageToTab(targetTabId, { type: MSG_TYPES.OBSERVE_SHOW }, frameId);
     await sleep(50);
-    await sendMessageToTab(maxId, { type: MSG_TYPES.OBSERVE_HIDE });
+    const hideResult = await sendMessageToTab(targetTabId, { type: MSG_TYPES.OBSERVE_HIDE }, frameId);
     const screenshotDataUrl = await new Promise((resolve, reject) => {
       chrome.tabs.captureVisibleTab(null, { format: "png" }, (dataUrl) => {
         const err = chrome.runtime.lastError;
@@ -56,9 +174,16 @@ async function triggerShowShortcut(tabId) {
         resolve(dataUrl);
       });
     });
-    console.log("[agent] triggerShowShortcut: activated tab", maxId, "captured screenshot length", screenshotDataUrl?.length || 0);
+    console.log("[agent] triggerShowShortcut: tab", targetTabId, "frame", frameId, "captured screenshot length", screenshotDataUrl?.length || 0);
+    return {
+      frameId,
+      screenshotDataUrl,
+      showResult,
+      hideResult,
+    };
   } catch (err) {
     console.warn("[agent] triggerShowShortcut failed:", err?.message || err);
+    return null;
   }
 }
 
@@ -294,6 +419,12 @@ async function summarizeScreenshot(questionText) {
       { frameId: 0 },
       () => {}
     );
+    // Speak the summary (fire and forget).
+    speakText(answer || "").then((audioUrl) => {
+      if (audioUrl) {
+        chrome.tabs.sendMessage(tab.id, { type: "PLAY_TTS", audioUrl }, { frameId: 0 }, () => {});
+      }
+    }).catch(() => {});
   } catch (err) {
     console.error("[summarize] Summarization failed:", err);
   }
@@ -533,7 +664,7 @@ async function runAgentBaseline({ goalText, agentTabId, agentWindowId, state }) 
       break;
     }
 
-    const observation = await observeTab({
+    let observation = await observeTab({
       tabId: agentTabId,
       windowId: agentWindowId,
       url: currentTab.url,
@@ -543,25 +674,36 @@ async function runAgentBaseline({ goalText, agentTabId, agentWindowId, state }) 
       console.warn("[agent] Observation failed; stopping");
       break;
     }
-    if (!observation.elements || observation.elements.length <= 3) {
-      console.warn("[agent] Low candidate count (<=3); re-observing once");
-      await triggerShowShortcut(agentTabId);
+    if (!observation.elements || observation.elements.length <= 1) {
+      console.warn("[agent] Low candidate count (<=1); re-observing once");
+      const fallbackInfo = await triggerShowShortcut(agentTabId);
+      const targetFrameId = fallbackInfo?.frameId ?? 0;
       const retryObs = await observeTab({
         tabId: agentTabId,
         windowId: agentWindowId,
         url: currentTab.url,
         title: currentTab.title,
         waitMs: 6000,
+        frameId: targetFrameId,
       });
       if (!retryObs || !retryObs.elements || retryObs.elements.length <= 3) {
         console.warn("[agent] No sufficient overlays after re-observe; stopping");
         break;
       }
-      observation.screenshotDataUrl = retryObs.screenshotDataUrl;
-      observation.elements = retryObs.elements;
-      observation.pageContext = retryObs.pageContext;
-      observation.url = retryObs.url;
-      observation.title = retryObs.title;
+      const shot = fallbackInfo?.screenshotDataUrl || retryObs.screenshotDataUrl;
+      observation = {
+        ...retryObs,
+        screenshotDataUrl: shot,
+        frameId: targetFrameId,
+      };
+      console.log(
+        "[agent] Fallback observation succeeded; frame:",
+        targetFrameId,
+        "candidates:",
+        retryObs.elements.length,
+        "screenshot len:",
+        shot ? shot.length : 0
+      );
     }
 
     let decision;
@@ -576,6 +718,7 @@ async function runAgentBaseline({ goalText, agentTabId, agentWindowId, state }) 
         userReply: pendingUserReply,
         pageContext: observation.pageContext || state.lastPageContext || "",
         lastSummary: state.lastSummary || "",
+        userProfile: USER_PROFILE,
       });
       pendingUserReply = "";
     } catch (err) {
@@ -601,6 +744,12 @@ async function runAgentBaseline({ goalText, agentTabId, agentWindowId, state }) 
     }
 
     if (action === "ask_user") {
+      const auto = await autoAnswerAskUser(value || "");
+      if (auto) {
+        actionHistory?.push(formatActionHistoryEntry(action, value, `user_reply:${auto.slice(0, 80)}`, true));
+        pendingUserReply = auto;
+        continue;
+      }
       const reply = await promptUser(value, agentTabId);
       if (!reply) {
         console.warn("[agent] No user reply; stopping");
@@ -618,7 +767,8 @@ async function runAgentBaseline({ goalText, agentTabId, agentWindowId, state }) 
       actionHistory,
       observation.elements || [],
       currentTab.url || "",
-      state
+      state,
+      observation.frameId || 0
     );
     if (!executed || executed.ok !== true) {
       const errMsg = (executed && executed.error) || "action_failed";
@@ -631,6 +781,7 @@ async function runAgentBaseline({ goalText, agentTabId, agentWindowId, state }) 
           pendingUserReply,
           state,
           lastError: errMsg,
+          frameId: observation.frameId || 0,
         });
         if (recovered) {
           continue;
@@ -649,7 +800,7 @@ async function runAgentBaseline({ goalText, agentTabId, agentWindowId, state }) 
   }
 }
 
-async function runBaselineRecovery({ goalText, agentTabId, agentWindowId, actionHistory, pendingUserReply, state, lastError }) {
+async function runBaselineRecovery({ goalText, agentTabId, agentWindowId, actionHistory, pendingUserReply, state, lastError, frameId = 0 }) {
   try {
     const tab = await getTabById(agentTabId);
     if (!tab) return false;
@@ -658,6 +809,7 @@ async function runBaselineRecovery({ goalText, agentTabId, agentWindowId, action
       windowId: agentWindowId,
       url: tab.url,
       title: tab.title,
+      frameId,
     });
     if (!observation) return false;
 
@@ -676,6 +828,7 @@ async function runBaselineRecovery({ goalText, agentTabId, agentWindowId, action
           userReply: pendingUserReply || "",
           lastSummary: state.lastSummary || "",
           recentActions: state.recentActions || [],
+          userProfile: USER_PROFILE,
         },
       });
     } catch (err) {
@@ -704,6 +857,7 @@ async function runBaselineRecovery({ goalText, agentTabId, agentWindowId, action
         pageContext: observation.pageContext || state.lastPageContext || "",
         lastSummary: state.lastSummary || "",
         lastError: missingNote,
+        userProfile: USER_PROFILE,
       });
     } catch (err) {
       console.error("[agent][status] Retry decision failed:", err);
@@ -722,7 +876,8 @@ async function runBaselineRecovery({ goalText, agentTabId, agentWindowId, action
       actionHistory,
       observation.elements || [],
       observation.url || tab.url || "",
-      state
+      state,
+      observation.frameId || frameId || 0
     );
     if (!executed || executed.ok !== true) {
       console.warn("[agent][status] Retry execute failed");
@@ -979,6 +1134,13 @@ async function runAgentPlannerExecutor({ goalText, agentTabId, agentWindowId, st
       }
 
       if (action === "ask_user") {
+        const auto = await autoAnswerAskUser(value || "");
+        if (auto) {
+          actionHistory?.push(formatActionHistoryEntry(action, value, `user_reply:${auto.slice(0, 80)}`, true));
+          pendingUserReply = auto;
+          metrics.stepsExecuted += 1;
+          continue;
+        }
         const reply = await promptUser(value, agentTabId);
         if (!reply) {
           console.warn("[agent][planner] No user reply; stopping");
@@ -997,7 +1159,8 @@ async function runAgentPlannerExecutor({ goalText, agentTabId, agentWindowId, st
         actionHistory,
         lastObservation.elements || [],
         currentTab.url || "",
-        state
+        state,
+        lastObservation.frameId || 0
       );
       if (!executed || executed.ok !== true) {
         console.warn("[agent][planner] Action failed; stopping");
@@ -1064,11 +1227,11 @@ async function sendPlannerSummary(tabId, metrics) {
   }
 }
 
-async function observeTab({ tabId, windowId, url, title, waitMs = 10 }) {
+async function observeTab({ tabId, windowId, url, title, waitMs = 10, frameId = 0 }) {
   let attempts = 0;
   while (attempts < 2) {
     try {
-      const showResult = await sendMessageToTab(tabId, { type: MSG_TYPES.OBSERVE_SHOW });
+      const showResult = await sendMessageToTab(tabId, { type: MSG_TYPES.OBSERVE_SHOW }, frameId);
       if (!showResult || showResult.success === false) {
         console.warn("[agent] OBSERVE_SHOW failed:", showResult && showResult.error);
         attempts++;
@@ -1080,7 +1243,7 @@ async function observeTab({ tabId, windowId, url, title, waitMs = 10 }) {
       await sleep(waitMs);
       const screenshotDataUrl = await captureVisibleTab(windowId);
 
-      const hideResult = await sendMessageToTab(tabId, { type: MSG_TYPES.OBSERVE_HIDE });
+      const hideResult = await sendMessageToTab(tabId, { type: MSG_TYPES.OBSERVE_HIDE }, frameId);
       if (!hideResult || hideResult.success === false) {
         console.warn("[agent] OBSERVE_HIDE failed:", hideResult && hideResult.error);
         attempts++;
@@ -1100,6 +1263,7 @@ async function observeTab({ tabId, windowId, url, title, waitMs = 10 }) {
         title: title || "",
         elements: showResult.elements || [],
         pageContext: showResult.pageContext || "",
+        frameId,
       };
     } catch (err) {
       attempts++;
@@ -1113,7 +1277,7 @@ async function observeTab({ tabId, windowId, url, title, waitMs = 10 }) {
   return null;
 }
 
-async function executeAction(tabId, action, value, actionHistory, elements, currentUrl, state) {
+async function executeAction(tabId, action, value, actionHistory, elements, currentUrl, state, frameId = 0) {
   try {
     if (action === "switch_tab") {
       await switchTabDirection(value);
@@ -1151,7 +1315,7 @@ async function executeAction(tabId, action, value, actionHistory, elements, curr
       let attemptedRetry = false;
       while (true) {
         try {
-          result = await sendMessageToTab(tabId, { type: MSG_TYPES.EXEC_ACTION, action, value });
+          result = await sendMessageToTab(tabId, { type: MSG_TYPES.EXEC_ACTION, action, value }, frameId);
         } catch (err) {
           const msg = err && err.message ? err.message.toLowerCase() : "";
           const needRetry =
@@ -1197,6 +1361,13 @@ async function executeAction(tabId, action, value, actionHistory, elements, curr
     }
 
     if (action === "ask_user") {
+      const auto = await autoAnswerAskUser(value || "");
+      if (auto) {
+        actionHistory?.push(formatActionHistoryEntry(action, value, `user_reply:${auto.slice(0, 80)}`, true));
+        state.lastUserReply = auto;
+        updateRecentState(tabId, action, value);
+        return { ok: true, info: "user_reply_captured" };
+      }
       const reply = await promptUser(value, tabId);
       if (!reply) {
         console.warn("[agent] ask_user had no reply; stopping");
@@ -1295,10 +1466,10 @@ function queryTabs(queryInfo) {
   });
 }
 
-function sendMessageToTab(tabId, payload) {
+function sendMessageToTab(tabId, payload, frameId = 0) {
   return new Promise((resolve, reject) => {
     try {
-      chrome.tabs.sendMessage(tabId, payload, { frameId: 0 }, (response) => {
+      chrome.tabs.sendMessage(tabId, payload, { frameId }, (response) => {
         const err = chrome.runtime.lastError;
         if (err) {
           reject(err);
@@ -1310,6 +1481,188 @@ function sendMessageToTab(tabId, payload) {
       reject(err);
     }
   });
+}
+
+async function getBestFrameId(tabId) {
+  const fallback = 0;
+
+  // Small delay to let the tab paint/focus settle, mirroring the reference flow.
+  await sleep(150);
+
+  const frames = await new Promise((resolve) => {
+    try {
+      chrome.webNavigation.getAllFrames({ tabId }, (fs) => {
+        const err = chrome.runtime.lastError;
+        if (err || !fs?.length) {
+          resolve([{ frameId: 0, parentFrameId: -1, url: "" }]);
+          return;
+        }
+        resolve(fs);
+      });
+    } catch (_) {
+      resolve([{ frameId: 0, parentFrameId: -1, url: "" }]);
+    }
+  });
+
+  const settled = await Promise.allSettled(
+    frames.map((f) =>
+      chrome.scripting.executeScript({
+        target: { tabId, frameIds: [f.frameId] },
+        args: [f.frameId],
+        func: (frameId) => {
+          const vw = Math.max(1, window.innerWidth || 0);
+          const vh = Math.max(1, window.innerHeight || 0);
+
+          const safeNum = (x, d = 0) => {
+            const n = Number(x);
+            return Number.isFinite(n) ? n : d;
+          };
+          const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+          const isVisible = (el) => {
+            if (!el) return false;
+            const cs = getComputedStyle(el);
+            if (cs.display === "none" || cs.visibility === "hidden" || safeNum(cs.opacity, 1) === 0) return false;
+            const r = el.getBoundingClientRect();
+            if (!Number.isFinite(r.width) || !Number.isFinite(r.height)) return false;
+            if (r.width < 3 || r.height < 3) return false;
+            if (r.right < 0 || r.bottom < 0 || r.left > vw || r.top > vh) return false;
+            return true;
+          };
+
+          const modalSelectors =
+            '[role="dialog"],[aria-modal="true"],dialog[open],.goog-modalpopup,.docs-dialog-container,.docs-material-dialog,.jfk-dialog,.jfk-modal-dialog,.docs-overlay-container,.docs-dialog,.modal-dialog';
+          const modals = Array.from(document.querySelectorAll(modalSelectors)).filter(isVisible);
+
+          const modalInfos = modals.map((el) => {
+            const r = el.getBoundingClientRect();
+            const areaRatio = (() => {
+              const w = Math.max(0, Math.min(r.right, vw) - Math.max(r.left, 0));
+              const h = Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
+              return (w * h) / (vw * vh);
+            })();
+            const z = (() => {
+              const zi = getComputedStyle(el).zIndex;
+              const n = Number(zi);
+              return Number.isFinite(n) ? n : 0;
+            })();
+            const pts = [
+              { x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2 },
+              { x: r.left + r.width * 0.25, y: r.top + r.height * 0.25 },
+              { x: r.left + r.width * 0.75, y: r.top + r.height * 0.25 },
+            ].map((p) => ({
+              x: clamp(Math.floor(p.x), 0, vw - 1),
+              y: clamp(Math.floor(p.y), 0, vh - 1),
+            }));
+            let hits = 0;
+            for (const p of pts) {
+              const topEl = document.elementFromPoint(p.x, p.y);
+              if (topEl && (topEl === el || el.contains(topEl))) hits++;
+            }
+            const ae = document.activeElement || null;
+            const aeInside = !!(ae && (ae === el || el.contains(ae)));
+            return { areaRatio, z, hitCount: hits, strongTopmost: hits >= 2, aeInside };
+          });
+
+          modalInfos.sort(
+            (a, b) =>
+              (b.strongTopmost - a.strongTopmost) ||
+              (b.hitCount - a.hitCount) ||
+              (b.aeInside - a.aeInside) ||
+              (b.z - a.z) ||
+              (b.areaRatio - a.areaRatio)
+          );
+          const bestModal = modalInfos[0] || null;
+
+          let parentFrameTopHits = 0;
+          let parentProbeOk = false;
+          try {
+            if (window.top !== window && window.frameElement && window.parent?.document) {
+              const fe = window.frameElement;
+              const pr = fe.getBoundingClientRect();
+              const pts = [
+                { x: (pr.left + pr.right) / 2, y: (pr.top + pr.bottom) / 2 },
+                { x: pr.left + pr.width * 0.25, y: pr.top + pr.height * 0.25 },
+                { x: pr.left + pr.width * 0.75, y: pr.top + pr.height * 0.25 },
+              ].map((p) => ({
+                x: clamp(Math.floor(p.x), 0, Math.max(0, window.parent.innerWidth - 1)),
+                y: clamp(Math.floor(p.y), 0, Math.max(0, window.parent.innerHeight - 1)),
+              }));
+              for (const p of pts) {
+                const topElInParent = window.parent.document.elementFromPoint(p.x, p.y);
+                if (topElInParent && (topElInParent === fe || fe.contains(topElInParent))) {
+                  parentFrameTopHits++;
+                }
+              }
+              parentProbeOk = true;
+            }
+          } catch (_) {
+            parentProbeOk = false;
+          }
+
+          const hasFocus = document.hasFocus();
+
+          let score = 0;
+          if (hasFocus) score += 8000;
+          score += parentFrameTopHits * 6000;
+          if (bestModal) {
+            score += 4000;
+            score += (bestModal.hitCount || 0) * 2200;
+            if (bestModal.strongTopmost) score += 1600;
+            if (bestModal.aeInside) score += 2200;
+            score += Math.round((bestModal.areaRatio || 0) * 1800);
+            score += Math.min(1200, Math.max(0, bestModal.z || 0));
+          }
+          if (parentProbeOk && window.top !== window && parentFrameTopHits === 0) {
+            score -= 9000;
+          }
+          if (frameId === 0) score += 50;
+
+          return {
+            frameId,
+            score,
+            hasFocus,
+            modalCount: modals.length,
+            hitCount: bestModal?.hitCount ?? 0,
+            strongTopmost: !!bestModal?.strongTopmost,
+            aeInside: !!bestModal?.aeInside,
+            parentFrameTopHits,
+            parentProbeOk,
+          };
+        },
+      })
+    )
+  );
+
+  const results = settled.map((s, idx) => {
+    const f = frames[idx];
+    if (s.status !== "fulfilled") {
+      return { frameId: f?.frameId ?? fallback, score: -1, parentFrameId: f?.parentFrameId ?? -1, parentProbeOk: false, parentFrameTopHits: 0, modalCount: 0, hitCount: 0, strongTopmost: false, aeInside: false, hasFocus: false };
+    }
+    const r = s.value?.[0]?.result;
+    if (!r) return { frameId: f?.frameId ?? fallback, score: -1, parentFrameId: f?.parentFrameId ?? -1, parentProbeOk: false, parentFrameTopHits: 0, modalCount: 0, hitCount: 0, strongTopmost: false, aeInside: false, hasFocus: false };
+    return { ...r, parentFrameId: f?.parentFrameId ?? -1 };
+  });
+
+  results.sort((a, b) => (b.score ?? -1) - (a.score ?? -1));
+
+  const strong = results.filter((r) => {
+    if ((r.score ?? -1) < 0) return false;
+    const frontmostIframe = r.parentProbeOk === true && (r.parentFrameTopHits ?? 0) >= 2;
+    const strongModal = r.strongTopmost === true || (r.hitCount ?? 0) >= 2 || r.aeInside === true;
+    if ((r.parentFrameId ?? -1) !== -1 && r.frameId !== 0) {
+      return frontmostIframe || (strongModal && r.hasFocus);
+    }
+    return strongModal;
+  });
+
+  const weak = results.filter((r) => (r.score ?? -1) >= 0 && ((r.modalCount ?? 0) > 0 || (r.hitCount ?? 0) > 0));
+
+  const bestCandidate =
+    (strong.length ? strong[0] : null) ||
+    (weak.length ? weak[0] : null) ||
+    results.find((r) => (r.score ?? -1) >= 0);
+
+  return bestCandidate?.frameId ?? fallback;
 }
 
 function captureVisibleTab(windowId) {
@@ -1514,6 +1867,12 @@ function promptUser(question, tabId) {
         { frameId: 0 },
         () => {}
       );
+      // Speak the question (fire and forget).
+      speakText(question || "").then((audioUrl) => {
+        if (audioUrl) {
+          chrome.tabs.sendMessage(tabId, { type: "PLAY_TTS", audioUrl }, { frameId: 0 }, () => {});
+        }
+      }).catch(() => {});
       setTimeout(() => {
       if (pendingUserReplyResolver) {
         pendingUserReplyResolver("");

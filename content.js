@@ -419,8 +419,8 @@
     scrollInterval = null;
 
     const viewport = window.innerHeight || 800;
-    const smallStep = Math.max(80, viewport * 0.25);
-    const largeStep = Math.max(160, viewport * 0.8);
+    const smallStep = Math.max(80, viewport * 0.4);
+    const largeStep = Math.max(160, viewport * 1/2);
 
     switch (value) {
       case "down_small":
@@ -859,7 +859,9 @@ User: google cnn.com
   /************  AGENT MESSAGE HANDLERS (top frame only) ************/
   chrome.runtime?.onMessage?.addListener((msg, sender, sendResponse) => {
     if (!msg || !msg.type) return;
-    if (!IS_TOP) return;
+    const overlayMsg = msg.type === "OBSERVE_SHOW" || msg.type === "OBSERVE_HIDE";
+    const execMsg = msg.type === "EXEC_ACTION";
+    if (!IS_TOP && !overlayMsg && !execMsg) return;
 
     if (msg.type === "PING") {
       sendResponse({ success: true });
@@ -898,6 +900,8 @@ User: google cnn.com
       })();
       return true;
     }
+
+    // No streaming TTS handling; PLAY_TTS is handled below.
   });
 
   /************  NEW: GLOBAL KEY HANDLER (s / h / digits + y) ************/
@@ -991,6 +995,28 @@ User: google cnn.com
         smartClick(target.el);
       }
     }
+  });
+
+  // Global TTS playback (all frames) with HTMLAudio
+  let ttsAudioEl = null;
+  function playTTS(audioUrl) {
+    if (!audioUrl) return;
+    try {
+      if (ttsAudioEl) {
+        ttsAudioEl.pause();
+        ttsAudioEl = null;
+      }
+      ttsAudioEl = new Audio(audioUrl);
+      ttsAudioEl.volume = 1.0;
+      ttsAudioEl.play().catch(() => {});
+    } catch (e) {
+      console.warn("[tts] play failed:", e?.message || e);
+    }
+  }
+
+  chrome.runtime?.onMessage?.addListener((msg) => {
+    if (!msg || msg.type !== "PLAY_TTS") return;
+    playTTS(msg.audioUrl);
   });
 
   /************  VOICE (REALTIME WS + TEXT_COMMAND) ************/

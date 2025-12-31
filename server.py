@@ -1,5 +1,6 @@
 import os, json, asyncio, base64
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from openai import OpenAI
 import websockets
@@ -13,6 +14,8 @@ app = FastAPI()
 
 PLANNER_MODEL = os.environ.get("PLANNER_MODEL", "gpt-4o")
 EXECUTOR_MODEL = os.environ.get("EXECUTOR_MODEL", "gpt-4o-mini")
+PROFILE_MODEL = os.environ.get("PROFILE_MODEL", "gpt-4o-mini")
+TTS_MODEL = os.environ.get("TTS_MODEL", "gpt-4o-mini-tts")
 
 
 
@@ -61,6 +64,14 @@ class SummarizeReq(BaseModel):
 class IntentReq(BaseModel):
     text: str
 
+
+class ProfileAnswerReq(BaseModel):
+    user_profile: dict
+    question: str
+
+class TTSReq(BaseModel):
+    text: str
+    voice: str = "marin"
 
 
 
@@ -422,6 +433,48 @@ def status(req: StatusReq):
         print("LLM error:", e)
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.post("/profile-answer")
+def profile_answer(req: ProfileAnswerReq):
+    """
+    Answer a profile-related question using only the supplied user_profile.
+    Returns "UNKNOWN" when the requested info is not present.
+    """
+    try:
+        payload = json.dumps({"user_profile": req.user_profile, "question": req.question})
+        resp = client.chat.completions.create(
+            model=PROFILE_MODEL,
+            response_format={"type": "text"},
+            messages=[
+                {"role": "system", "content": "Answer using only the provided user_profile. If the info is missing, reply EXACTLY UNKNOWN."},
+                {"role": "user", "content": payload},
+            ],
+        )
+        answer = (resp.choices[0].message.content or "").strip()
+        return {"answer": answer}
+    except Exception as e:
+        print("Profile answer error:", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/tts")
+def tts(req: TTSReq):
+    """
+    Generate speech audio (mp3) from text using the configured TTS_MODEL voice (default "marin").
+    Returns a data URL for convenient playback (non-streaming).
+    """
+    try:
+        resp = client.audio.speech.create(
+            model=TTS_MODEL,
+            voice=req.voice or "marin",
+            input=req.text or "",
+        )
+        audio_bytes = resp.read()
+        b64 = base64.b64encode(audio_bytes).decode("ascii")
+        return {"audio": f"data:audio/mp3;base64,{b64}"}
+    except Exception as e:
+        print("TTS error:", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 
