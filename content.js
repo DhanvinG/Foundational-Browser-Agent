@@ -861,7 +861,7 @@ User: google cnn.com
     if (!msg || !msg.type) return;
     const overlayMsg = msg.type === "OBSERVE_SHOW" || msg.type === "OBSERVE_HIDE";
     const execMsg = msg.type === "EXEC_ACTION";
-    if (!IS_TOP && !overlayMsg && !execMsg) return;
+    if (!IS_TOP && !overlayMsg && !execMsg && msg.type !== "PLAY_TTS") return;
 
     if (msg.type === "PING") {
       sendResponse({ success: true });
@@ -901,7 +901,7 @@ User: google cnn.com
       return true;
     }
 
-    // No streaming TTS handling; PLAY_TTS is handled below.
+  // PLAY_TTS handling below
   });
 
   /************  NEW: GLOBAL KEY HANDLER (s / h / digits + y) ************/

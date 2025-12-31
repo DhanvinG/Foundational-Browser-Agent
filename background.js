@@ -192,11 +192,11 @@ async function handleTextCommand(rawText) {
   if (!text) return;
 
   const lowered = text.toLowerCase();
-  const heyCoraPrefix = "hey cora";
-  const hasHeyCora = lowered.startsWith(heyCoraPrefix);
-  const stripped = hasHeyCora ? text.slice(heyCoraPrefix.length).trim() : text;
+  const hotwords = ["hey cora", "hey quora", "hey clara"];
+  const matchedHotword = hotwords.find((hw) => lowered.startsWith(hw));
+  const stripped = matchedHotword ? text.slice(matchedHotword.length).trim() : text;
 
-  if (hasHeyCora) {
+  if (matchedHotword) {
     if (isSummarizeRequest(stripped)) {
       await summarizeScreenshot(stripped);
       return;
@@ -419,7 +419,7 @@ async function summarizeScreenshot(questionText) {
       { frameId: 0 },
       () => {}
     );
-    // Speak the summary (fire and forget).
+    // Speak the summary (fire and forget) in background.
     speakText(answer || "").then((audioUrl) => {
       if (audioUrl) {
         chrome.tabs.sendMessage(tab.id, { type: "PLAY_TTS", audioUrl }, { frameId: 0 }, () => {});
