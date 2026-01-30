@@ -329,7 +329,7 @@ def summarize(req: SummarizeReq):
             response_format={"type": "text"},
             messages=[
                 {"role": "system", "content": (
-                    "You are a helpful, confident assistant. Answer in 2–4 sentences, natural and conversational, "
+                    "You are a helpful, confident assistant. Answer in 2–3 sentences, natural and conversational, "
                     "as if speaking aloud. If the user asked a question, answer it directly first. "
                     "Do NOT give bullet points or numbered steps. Be concise and avoid filler or rambling."
                 )},
@@ -643,6 +643,10 @@ async def realtime_proxy(ws: WebSocket):
 
                 if etype == "error":
                     err = evt.get("error", {}) or {}
+                    try:
+                        print(f"[ws] openai error: {err.get('message', 'OpenAI error')}")
+                    except Exception:
+                        pass
                     try:
                         await ws.send_json({"type": "error", "message": err.get("message", "OpenAI error")})
                     except Exception:

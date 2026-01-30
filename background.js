@@ -37,7 +37,7 @@ const USER_PROFILE = {
     "AI Agents",
     "Distributed Systems"
   ],
-  bio: "Software engineer focused on building scalable, user-centered products at the intersection of AI and web platforms. Passionate about clean system design, low-latency experiences, and turning complex workflows into intuitive tools. Always experimenting, shipping, and iterating."
+  bio: "Software engineer at Stripe focused on building scalable, user-centered products at the intersection of AI and web platforms. Passionate about clean system design, low-latency experiences, and turning complex workflows into intuitive tools. Always experimenting, shipping, and iterating."
 };
 
 const SMALL_LLM_API_KEY = null; // set to your OpenAI API key if desired
@@ -197,9 +197,19 @@ async function handleTextCommand(rawText) {
   const stripped = matchedHotword ? text.slice(matchedHotword.length).trim() : text;
 
   if (matchedHotword) {
-    if (isSummarizeRequest(stripped)) {
+    // tell UI to go orange and animate
+    const tab = await getActiveTab();
+    if (tab) {
+      chrome.tabs.sendMessage(tab.id, { type: "UI_HOTWORD_START" }, { frameId: 0 }, () => {});
+    }
+    const summarizeReason = summarizeTriggerMatch(stripped);
+    if (summarizeReason) {
+      console.log("[summarize] trigger matched:", summarizeReason, "text:", stripped);
       await summarizeScreenshot(stripped);
       return;
+    }
+    if (tab) {
+      chrome.tabs.sendMessage(tab.id, { type: "UI_LISTENING_STOP" }, { frameId: 0 }, () => {});
     }
     startAgent(stripped).catch((e) => console.error("[agent] crashed:", e));
     return;
@@ -221,18 +231,21 @@ async function handleTextCommand(rawText) {
   }
 }
 
-function isSummarizeRequest(text) {
+function summarizeTriggerMatch(text) {
   const t = (text || "").toLowerCase();
+  if (t.includes("summarize")) return "summarize";
+  if (t.includes("explain")) return "explain";
+  if (t.includes("what is")) return "what is";
+  if (t.includes("what does")) return "what does";
+  if (t.startsWith("describe ")) return "describe";
   const whatAboutPattern = /\bwhat(?:'s| is)\s+.*about\b/;
-  return (
-    t.includes("how") ||
-    t.includes("summarize") ||
-    t.includes("explain") ||
-    t.includes("what is") ||
-    t.includes("what does") ||
-    t.startsWith("describe ") ||
-    whatAboutPattern.test(t)
-  );
+  if (whatAboutPattern.test(t)) return "what's about";
+  if (t.includes("how")) return "how";
+  return null;
+}
+
+function isSummarizeRequest(text) {
+  return summarizeTriggerMatch(text) !== null;
 }
 
 function detectSimpleCommand(text) {
@@ -413,13 +426,9 @@ async function summarizeScreenshot(questionText) {
     state.lastSummary = (answer || "").slice(0, 500);
     sessionState.set(tab.id, state);
 
-    chrome.tabs.sendMessage(
-      tab.id,
-      { type: "SHOW_SUMMARY", summary: answer },
-      { frameId: 0 },
-      () => {}
-    );
-    // Speak the summary (fire and forget) in background.
+    chrome.tabs.sendMessage(tab.id, { type: "UI_RESPONSE_SHOW", text: answer || "" }, { frameId: 0 }, () => {});
+    chrome.tabs.sendMessage(tab.id, { type: "SHOW_SUMMARY", summary: answer }, { frameId: 0 }, () => {});
+    // Speak the summary (fire and forget) in background; pill collapses when PLAY_TTS ends (handled in content).
     speakText(answer || "").then((audioUrl) => {
       if (audioUrl) {
         chrome.tabs.sendMessage(tab.id, { type: "PLAY_TTS", audioUrl }, { frameId: 0 }, () => {});
@@ -644,6 +653,12 @@ async function startAgent(goalText, lockedTarget, mode) {
   } finally {
     isAgentRunning = false;
     console.log("[agent] Stopped");
+    try {
+      const tab = await getTabById(agentTabId);
+      if (tab) {
+        chrome.tabs.sendMessage(tab.id, { type: "UI_HOTWORD_STOP" }, { frameId: 0 }, () => {});
+      }
+    } catch (_) {}
   }
 }
 

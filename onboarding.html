@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cora Onboarding</title>
+    <link rel="stylesheet" href="onboarding.css" />
+  </head>
+  <body>
+    <div class="bg-orb orb-a"></div>
+    <div class="bg-orb orb-b"></div>
+
+    <div class="shell">
+      <header class="topbar">
+        <div class="brand">
+          <img class="brand-mark" src="icon.png" alt="Cora logo" />
+          <span class="brand-text">Cora</span>
+        </div>
+        <div class="stepper" aria-label="Onboarding steps">
+          <span class="step-dot" data-step="0">1</span>
+          <span class="step-dot" data-step="1">2</span>
+          <span class="step-dot" data-step="2">3</span>
+        </div>
+      </header>
+
+      <main class="card">
+        <section class="step is-active" data-step="0">
+          <div class="hero-split">
+            <div class="hero-left">
+              <div class="hero-logo">
+                <img class="hero-logo-img" src="update.png" alt="Cora logo" />
+              </div>
+              <h1>Welcome to Cora</h1>
+              <p class="hero-sub">The ultimate AI desktop assistant</p>
+              <button id="heroContinue" class="hero-cta" type="button">Continue</button>
+              <p class="hero-terms">
+                By signing up, you agree to our Terms of Service and Privacy Policy.
+              </p>
+              <div class="hero-logos">
+                <span>Forbes</span>
+                <span>The New York Times</span>
+                <span>TechCrunch</span>
+              </div>
+            </div>
+            <div class="hero-right">
+              <div class="hero-right-stack">
+                <div class="screen-wrap">
+                  <img class="hero-display" src="display.png" alt="Cora demo" />
+                </div>
+                <div class="hero-caption">
+                  <span>Real-time desktop assistant,</span>
+                  <span>always ready to help</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="step" data-step="1">
+          <div class="video-step">
+            <div>
+              <p class="eyebrow">Quick intro</p>
+              <h2>Watch a 60-second overview.</h2>
+              <p class="lead">
+                Learn how Cora listens, navigates, and asks you for missing details.
+                Replace this placeholder with your real intro video when ready.
+              </p>
+            </div>
+            <div class="video-frame">
+              <div class="video-placeholder">
+                <div class="play">Play</div>
+                <div class="caption">Intro video placeholder</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="step" data-step="2">
+          <div class="form-step">
+            <div>
+              <p class="eyebrow">Personalize Cora</p>
+              <h2>Tell Cora about you.</h2>
+              <p class="lead">
+                These details are used to fill forms and emails automatically.
+                You can update them anytime.
+              </p>
+            </div>
+
+            <form id="profileForm" class="profile-form" autocomplete="off">
+              <label>
+                Name
+                <input type="text" id="name" placeholder="Your name" />
+              </label>
+              <label>
+                Email
+                <input type="email" id="email" placeholder="you@example.com" />
+              </label>
+              <label>
+                Phone
+                <input type="tel" id="phone" placeholder="+1 555 000 0000" />
+              </label>
+              <label>
+                Role
+                <input type="text" id="role" placeholder="Job title" />
+              </label>
+              <label>
+                Company
+                <input type="text" id="company" placeholder="Company name" />
+              </label>
+              <label>
+                School
+                <input type="text" id="school" placeholder="School or university" />
+              </label>
+              <label class="span-2">
+                Skills (comma separated)
+                <input type="text" id="skills" placeholder="JavaScript, Product, Design" />
+              </label>
+              <label class="span-2">
+                Bio
+                <textarea id="bio" rows="4" placeholder="Short professional bio"></textarea>
+              </label>
+            </form>
+          </div>
+        </section>
+      </main>
+
+      <footer class="controls">
+        <button id="backBtn" class="btn ghost" type="button">Back</button>
+        <div class="controls-spacer"></div>
+        <button id="nextBtn" class="btn primary" type="button">Continue</button>
+        <button id="finishBtn" class="btn primary" type="button" hidden>Finish</button>
+      </footer>
+
+      <div id="status" class="status" role="status" aria-live="polite"></div>
+    </div>
+
+    <script src="onboarding.js"></script>
+  </body>
+</html>
