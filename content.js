@@ -549,17 +549,10 @@
   }
 
   function getOverlayTheme() {
-    if (coraAgentActive) {
-      return {
-        border: "#ff8a3c",
-        fill: "rgba(255, 140, 40, 0.06)",
-        label: "rgba(255, 140, 40, 0.75)"
-      };
-    }
     return {
-      border: "#0f0",
-      fill: "rgba(0, 128, 0, 0.01)",
-      label: "rgba(0, 128, 0, 0.6)"
+      border: "#ff8a3c",
+      fill: "rgba(255, 140, 40, 0.06)",
+      label: "rgba(255, 140, 40, 0.75)"
     };
   }
 
@@ -707,12 +700,6 @@
           .filter(Boolean)
           .join(" | ");
         if (focusHint) parts.push(focusHint);
-      }
-
-      // Nearby visible text (very small sample)
-      const bodyText = (document.body && document.body.innerText) || "";
-      if (bodyText) {
-        parts.push(bodyText.slice(0, 300));
       }
 
       const context = parts.join(" || ").replace(/\s+/g, " ").trim();

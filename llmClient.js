@@ -126,6 +126,8 @@ self.requestAgentStep = async function requestAgentStep({
   actionHistory,
   elements,
   userReply,
+  lastAction,
+  lastExpectation,
   userProfile
 }) {
   const payload = {
@@ -138,6 +140,8 @@ self.requestAgentStep = async function requestAgentStep({
       actionHistory: Array.isArray(actionHistory) ? actionHistory : [],
       elements: Array.isArray(elements) ? elements : [],
       userReply: userReply || "",
+      lastAction: lastAction || null,
+      lastExpectation: lastExpectation || null,
       userProfile: userProfile || null
     }
   };
@@ -147,7 +151,12 @@ self.requestAgentStep = async function requestAgentStep({
     throw new Error("LLM response missing required action");
   }
   validateActionPayload(data.action, data.value);
-  return { action: data.action, value: data.value };
+  return {
+    action: data.action,
+    value: data.value,
+    why: typeof data.why === "string" ? data.why : "",
+    expect_next: typeof data.expect_next === "string" ? data.expect_next : ""
+  };
 };
 
 self.requestPlan = async function requestPlan(payload) {

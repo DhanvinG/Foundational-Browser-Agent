@@ -11,6 +11,7 @@ const MSG_TYPES = {
 
 const MAX_STEPS = 30;
 const MAX_CONSECUTIVE_SCROLLS = 6;
+const POST_ACTION_DELAY_MS = 250;
 let isAgentRunning = false;
 let pendingUserReplyResolver = null;
 const sessionState = new Map(); // per-tab state
@@ -22,7 +23,7 @@ const INTENT_ENDPOINT = "http://localhost:8000/intent"; // simple command intent
 
 // Simple personalization profile used to auto-fill forms/emails.
 const USER_PROFILE = {
-  name: "Alex Chen",
+  name: "Dhanvin Ganeshkumar",
   email: "alex.chen.dev@gmail.com",
   phone: "+1-415-867-3921",
   role: "Software Engineer",
@@ -133,6 +134,32 @@ async function autoAnswerAskUser(question = "", askCache = null) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function notifyAgentUi(tabId, isActive, frameId = 0) {
+  return new Promise((resolve) => {
+    try {
+      chrome.tabs.sendMessage(
+        tabId,
+        { type: isActive ? "UI_AGENT_START" : "UI_AGENT_STOP" },
+        { frameId },
+        () => {
+          // Read lastError to suppress unchecked runtime.lastError noise.
+          const _ignored = chrome.runtime.lastError;
+          resolve(true);
+        }
+      );
+    } catch (_) {
+      resolve(false);
+    }
+  });
+}
+
+function logTiming(label, startMs, thresholdMs = 0) {
+  const elapsed = Date.now() - startMs;
+  if (elapsed >= thresholdMs) {
+    console.log(`[timing] ${label}: ${elapsed}ms`);
+  }
 }
 
 async function triggerShowShortcut(tabId) {
@@ -421,7 +448,8 @@ async function summarizeScreenshot(questionText) {
       lastSummary: "",
       lastPageContext: "",
       lastUserReply: "",
-      recentActions: [],
+      lastAction: null,
+      lastExpectation: null,
     };
     state.lastSummary = (answer || "").slice(0, 500);
     sessionState.set(tab.id, state);
@@ -630,9 +658,11 @@ async function startAgent(goalText, lockedTarget, mode) {
     lastSummary: "",
     lastPageContext: "",
     lastUserReply: "",
-    recentActions: [],
+    lastAction: null,
+    lastExpectation: null,
   };
   sessionState.set(agentTabId, state);
+  await notifyAgentUi(agentTabId, true);
 
   try {
     if (agentMode === "planner_executor") {
@@ -656,6 +686,7 @@ async function startAgent(goalText, lockedTarget, mode) {
     try {
       const tab = await getTabById(agentTabId);
       if (tab) {
+        await notifyAgentUi(tab.id, false);
         chrome.tabs.sendMessage(tab.id, { type: "UI_HOTWORD_STOP" }, { frameId: 0 }, () => {});
       }
     } catch (_) {}
@@ -679,20 +710,27 @@ async function runAgentBaseline({ goalText, agentTabId, agentWindowId, state }) 
       break;
     }
 
+    const observeStart = Date.now();
     let observation = await observeTab({
       tabId: agentTabId,
       windowId: agentWindowId,
       url: currentTab.url,
       title: currentTab.title,
     });
+    logTiming("observeTab", observeStart, 250);
+    if (observation && typeof observation.pageContext === "string") {
+      console.log("[agent] pageContext:", observation.pageContext);
+    }
     if (!observation) {
       console.warn("[agent] Observation failed; stopping");
       break;
     }
+    await notifyAgentUi(agentTabId, true);
     if (!observation.elements || observation.elements.length <= 1) {
       console.warn("[agent] Low candidate count (<=1); re-observing once");
       const fallbackInfo = await triggerShowShortcut(agentTabId);
       const targetFrameId = fallbackInfo?.frameId ?? 0;
+      const retryStart = Date.now();
       const retryObs = await observeTab({
         tabId: agentTabId,
         windowId: agentWindowId,
@@ -701,6 +739,10 @@ async function runAgentBaseline({ goalText, agentTabId, agentWindowId, state }) 
         waitMs: 6000,
         frameId: targetFrameId,
       });
+      logTiming("observeTab_retry", retryStart, 250);
+      if (retryObs && typeof retryObs.pageContext === "string") {
+        console.log("[agent] pageContext (retry):", retryObs.pageContext);
+      }
       if (!retryObs || !retryObs.elements || retryObs.elements.length <= 3) {
         console.warn("[agent] No sufficient overlays after re-observe; stopping");
         break;
@@ -711,6 +753,7 @@ async function runAgentBaseline({ goalText, agentTabId, agentWindowId, state }) 
         screenshotDataUrl: shot,
         frameId: targetFrameId,
       };
+      await notifyAgentUi(agentTabId, true);
       console.log(
         "[agent] Fallback observation succeeded; frame:",
         targetFrameId,
@@ -723,18 +766,22 @@ async function runAgentBaseline({ goalText, agentTabId, agentWindowId, state }) 
 
     let decision;
     try {
+      const decisionStart = Date.now();
       decision = await getNextAction({
         goalText,
         screenshotDataUrl: observation.screenshotDataUrl,
         url: currentTab.url || "",
         title: currentTab.title || "",
-        actionHistory,
+        actionHistory: actionHistory.slice(-5),
         elements: observation.elements || [],
         userReply: pendingUserReply,
         pageContext: observation.pageContext || state.lastPageContext || "",
         lastSummary: state.lastSummary || "",
+        lastAction: state.lastAction || null,
+        lastExpectation: state.lastExpectation || null,
         userProfile: USER_PROFILE,
       });
+      logTiming("getNextAction", decisionStart, 300);
       pendingUserReply = "";
     } catch (err) {
       console.error("[agent] Decision error:", err);
@@ -762,6 +809,8 @@ async function runAgentBaseline({ goalText, agentTabId, agentWindowId, state }) 
       const auto = await autoAnswerAskUser(value || "");
       if (auto) {
         actionHistory?.push(formatActionHistoryEntry(action, value, `user_reply:${auto.slice(0, 80)}`, true));
+        updateLastAction(state, action, value, "user_reply_captured");
+        updateLastExpectation(state, decision);
         pendingUserReply = auto;
         continue;
       }
@@ -771,10 +820,13 @@ async function runAgentBaseline({ goalText, agentTabId, agentWindowId, state }) 
         break;
       }
       actionHistory?.push(formatActionHistoryEntry(action, value, `user_reply:${reply.slice(0, 80)}`, true));
+      updateLastAction(state, action, value, "user_reply_captured");
+      updateLastExpectation(state, decision);
       pendingUserReply = reply;
       continue;
     }
 
+    const execStart = Date.now();
     const executed = await executeAction(
       agentTabId,
       action,
@@ -785,6 +837,7 @@ async function runAgentBaseline({ goalText, agentTabId, agentWindowId, state }) 
       state,
       observation.frameId || 0
     );
+    logTiming("executeAction", execStart, 200);
     if (!executed || executed.ok !== true) {
       const errMsg = (executed && executed.error) || "action_failed";
       if (errMsg.toLowerCase().includes("no candidate found")) {
@@ -805,6 +858,7 @@ async function runAgentBaseline({ goalText, agentTabId, agentWindowId, state }) 
       console.warn("[agent] Action failed; stopping");
       break;
     }
+    updateLastExpectation(state, decision);
 
     consecutiveScrolls = action === "scroll" ? consecutiveScrolls + 1 : 0;
 
@@ -842,7 +896,8 @@ async function runBaselineRecovery({ goalText, agentTabId, agentWindowId, action
           actionHistory: actionHistory.slice(-5),
           userReply: pendingUserReply || "",
           lastSummary: state.lastSummary || "",
-          recentActions: state.recentActions || [],
+          lastAction: state.lastAction || null,
+          lastExpectation: state.lastExpectation || null,
           userProfile: USER_PROFILE,
         },
       });
@@ -866,11 +921,13 @@ async function runBaselineRecovery({ goalText, agentTabId, agentWindowId, action
         screenshotDataUrl: observation.screenshotDataUrl || "",
         url: observation.url || tab.url || "",
         title: observation.title || tab.title || "",
-        actionHistory,
+        actionHistory: actionHistory.slice(-5),
         elements: observation.elements || [],
         userReply: pendingUserReply,
         pageContext: observation.pageContext || state.lastPageContext || "",
         lastSummary: state.lastSummary || "",
+        lastAction: state.lastAction || null,
+        lastExpectation: state.lastExpectation || null,
         lastError: missingNote,
         userProfile: USER_PROFILE,
       });
@@ -898,6 +955,7 @@ async function runBaselineRecovery({ goalText, agentTabId, agentWindowId, action
       console.warn("[agent][status] Retry execute failed");
       return false;
     }
+    updateLastExpectation(state, retryDecision);
 
     console.log("[agent][status] Retry succeeded");
     return true;
@@ -937,6 +995,10 @@ async function runAgentPlannerExecutor({ goalText, agentTabId, agentWindowId, st
     });
     metrics.observeCalls += 1;
     metrics.observeDurations.push(Date.now() - t0);
+    logTiming("observeTab_planner", t0, 250);
+    if (observation && typeof observation.pageContext === "string") {
+      console.log("[agent] pageContext:", observation.pageContext);
+    }
     if (observation && observation.pageContext) {
       state.lastPageContext = observation.pageContext;
     }
@@ -946,12 +1008,13 @@ async function runAgentPlannerExecutor({ goalText, agentTabId, agentWindowId, st
   const buildMeta = (observation, extraMeta = {}) => ({
     url: (observation && observation.url) || "",
     title: (observation && observation.title) || "",
-    actionHistory,
+    actionHistory: actionHistory.slice(-5),
     elements: (observation && observation.elements) || [],
     pageContext: (observation && observation.pageContext) || state.lastPageContext || "",
     lastSummary: state.lastSummary || "",
+    lastAction: state.lastAction || null,
+    lastExpectation: state.lastExpectation || null,
     userReply: pendingUserReply,
-    recentActions: state.recentActions || [],
     ...extraMeta,
   });
 
@@ -965,6 +1028,7 @@ async function runAgentPlannerExecutor({ goalText, agentTabId, agentWindowId, st
     });
     metrics.plannerCalls += 1;
     metrics.plannerDurations.push(Date.now() - t0);
+    logTiming("planner_call", t0, 300);
     try {
       const planArr = Array.isArray(resp?.plan) ? resp.plan : [];
       const stepIds = planArr.map((s) => s?.id || "?").join(", ");
@@ -985,6 +1049,7 @@ async function runAgentPlannerExecutor({ goalText, agentTabId, agentWindowId, st
     });
     metrics.executorCalls += 1;
     metrics.executorDurations.push(Date.now() - t0);
+    logTiming("executor_call", t0, 250);
     try {
       console.log(
         "[agent][planner] executor decision for",
@@ -1052,6 +1117,7 @@ async function runAgentPlannerExecutor({ goalText, agentTabId, agentWindowId, st
       console.warn("[agent][planner] Initial observation failed; stopping");
       return;
     }
+    await notifyAgentUi(agentTabId, true);
 
     let planResp;
     try {
@@ -1088,6 +1154,7 @@ async function runAgentPlannerExecutor({ goalText, agentTabId, agentWindowId, st
         console.warn("[agent][planner] Observation failed; stopping");
         break;
       }
+      await notifyAgentUi(agentTabId, true);
 
       let decision;
       try {
@@ -1117,9 +1184,11 @@ async function runAgentPlannerExecutor({ goalText, agentTabId, agentWindowId, st
             screenshotDataUrl: lastObservation.screenshotDataUrl || "",
             url: lastObservation.url || currentTab.url || "",
             title: lastObservation.title || currentTab.title || "",
-            actionHistory,
+            actionHistory: actionHistory.slice(-5),
             elements: lastObservation.elements || [],
             userReply: pendingUserReply,
+            lastAction: state.lastAction || null,
+            lastExpectation: state.lastExpectation || null,
           });
           action = fallbackDecision.action;
           value = fallbackDecision.value;
@@ -1152,6 +1221,8 @@ async function runAgentPlannerExecutor({ goalText, agentTabId, agentWindowId, st
         const auto = await autoAnswerAskUser(value || "");
         if (auto) {
           actionHistory?.push(formatActionHistoryEntry(action, value, `user_reply:${auto.slice(0, 80)}`, true));
+          updateLastAction(state, action, value, "user_reply_captured");
+          updateLastExpectation(state, decision);
           pendingUserReply = auto;
           metrics.stepsExecuted += 1;
           continue;
@@ -1162,25 +1233,30 @@ async function runAgentPlannerExecutor({ goalText, agentTabId, agentWindowId, st
           break;
         }
         actionHistory?.push(formatActionHistoryEntry(action, value, `user_reply:${reply.slice(0, 80)}`, true));
+        updateLastAction(state, action, value, "user_reply_captured");
+        updateLastExpectation(state, decision);
         pendingUserReply = reply;
         metrics.stepsExecuted += 1;
         continue;
       }
 
-      const executed = await executeAction(
-        agentTabId,
-        action,
-        value,
-        actionHistory,
-        lastObservation.elements || [],
-        currentTab.url || "",
-        state,
-        lastObservation.frameId || 0
-      );
+    const execStart = Date.now();
+    const executed = await executeAction(
+      agentTabId,
+      action,
+      value,
+      actionHistory,
+      lastObservation.elements || [],
+      currentTab.url || "",
+      state,
+      lastObservation.frameId || 0
+    );
+    logTiming("executeAction_planner", execStart, 200);
       if (!executed || executed.ok !== true) {
         console.warn("[agent][planner] Action failed; stopping");
         break;
       }
+      updateLastExpectation(state, decision);
 
       metrics.stepsExecuted += 1;
       lastError = "";
@@ -1292,6 +1368,26 @@ async function observeTab({ tabId, windowId, url, title, waitMs = 10, frameId = 
   return null;
 }
 
+function updateLastAction(state, action, value, info) {
+  if (!state || typeof action !== "string") return;
+  state.lastAction = {
+    action,
+    value,
+    info: info || "",
+  };
+}
+
+function updateLastExpectation(state, decision) {
+  if (!state || !decision) return;
+  const why = typeof decision.why === "string" ? decision.why.trim() : "";
+  const expectNext = typeof decision.expect_next === "string" ? decision.expect_next.trim() : "";
+  if (!why && !expectNext) return;
+  state.lastExpectation = {
+    why,
+    expect_next: expectNext,
+  };
+}
+
 async function executeAction(tabId, action, value, actionHistory, elements, currentUrl, state, frameId = 0) {
   try {
     if (action === "switch_tab") {
@@ -1299,7 +1395,7 @@ async function executeAction(tabId, action, value, actionHistory, elements, curr
       await waitForTabComplete(tabId).catch(() => {});
       actionHistory?.push(formatActionHistoryEntry(action, value, "switched tab", true));
       console.log("[agent] Switched tab:", value);
-      updateRecentState(tabId, action, value);
+      updateLastAction(state, action, value, "switched tab");
       return { ok: true, info: "switched tab" };
     }
 
@@ -1308,7 +1404,7 @@ async function executeAction(tabId, action, value, actionHistory, elements, curr
       await waitForTabComplete(tabId);
       actionHistory?.push(formatActionHistoryEntry(action, value, "navigated", true));
       console.log("[agent] Navigated to URL:", value);
-      updateRecentState(tabId, action, value);
+      updateLastAction(state, action, value, "navigated");
       return { ok: true, info: "navigated" };
     }
 
@@ -1321,7 +1417,7 @@ async function executeAction(tabId, action, value, actionHistory, elements, curr
       await waitForTabComplete(tabId);
       actionHistory?.push(formatActionHistoryEntry(action, value, "searched", true));
       console.log("[agent] Searched:", query);
-      updateRecentState(tabId, action, value);
+      updateLastAction(state, action, value, "searched");
       return { ok: true, info: "searched" };
     }
 
@@ -1330,6 +1426,7 @@ async function executeAction(tabId, action, value, actionHistory, elements, curr
       let attemptedRetry = false;
       while (true) {
         try {
+          logSelectedElement(action, value, elements);
           result = await sendMessageToTab(tabId, { type: MSG_TYPES.EXEC_ACTION, action, value }, frameId);
         } catch (err) {
           const msg = err && err.message ? err.message.toLowerCase() : "";
@@ -1371,7 +1468,10 @@ async function executeAction(tabId, action, value, actionHistory, elements, curr
         const needsPause = isDriveUrl(currentUrl) ? isMenuLikeDescriptor(desc) : isLikelyModalTrigger(desc);
         if (needsPause) await sleep(50);
       }
-      updateRecentState(tabId, action, value);
+      if (action === "click_index" || action === "select_type" || action === "type_text") {
+        await sleep(POST_ACTION_DELAY_MS);
+      }
+      updateLastAction(state, action, value, result.info || "");
       return { ok: true };
     }
 
@@ -1380,7 +1480,7 @@ async function executeAction(tabId, action, value, actionHistory, elements, curr
       if (auto) {
         actionHistory?.push(formatActionHistoryEntry(action, value, `user_reply:${auto.slice(0, 80)}`, true));
         state.lastUserReply = auto;
-        updateRecentState(tabId, action, value);
+        updateLastAction(state, action, value, "user_reply_captured");
         return { ok: true, info: "user_reply_captured" };
       }
       const reply = await promptUser(value, tabId);
@@ -1390,7 +1490,7 @@ async function executeAction(tabId, action, value, actionHistory, elements, curr
       }
       actionHistory?.push(formatActionHistoryEntry(action, value, `user_reply:${reply.slice(0, 80)}`, true));
       state.lastUserReply = reply;
-      updateRecentState(tabId, action, value);
+      updateLastAction(state, action, value, "user_reply_captured");
       return { ok: true, info: "user_reply_captured" };
     }
 
@@ -1797,6 +1897,19 @@ function findElementDescriptor(elements, idx) {
   return elements.find((el) => el && Number(el.index) === n) || null;
 }
 
+function logSelectedElement(action, value, elements) {
+  if (action !== "click_index" && action !== "select_type") return;
+  const index = action === "select_type" && value && typeof value === "object" ? value.index : value;
+  const desc = findElementDescriptor(elements, index);
+  if (!desc) return;
+  console.log("[agent] Selected element", {
+    action,
+    index,
+    accessibleName: typeof desc.accessibleName === "string" ? desc.accessibleName : "",
+    innerText: typeof desc.innerText === "string" ? desc.innerText : "",
+  });
+}
+
 function isMenuLikeDescriptor(desc) {
   if (!desc) return false;
   const role = (desc.role || "").toLowerCase();
@@ -1898,23 +2011,6 @@ function promptUser(question, tabId) {
     resolve("");
   }
 });
-}
-
-function updateRecentState(tabId, action, value) {
-  const state = sessionState.get(tabId) || {
-    lastSummary: "",
-    lastPageContext: "",
-    lastUserReply: "",
-    recentActions: [],
-  };
-  state.recentActions = updateRecentActions(state.recentActions, action, value);
-  sessionState.set(tabId, state);
-}
-
-function updateRecentActions(recentActions = [], action, value) {
-  const entry = `${action}:${JSON.stringify(value)}`.slice(0, 120);
-  const next = [...recentActions, entry];
-  return next.slice(-5);
 }
 
 async function startAgentAtUrl(url, goalText, mode) {

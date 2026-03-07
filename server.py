@@ -1,4 +1,4 @@
-import os, json, asyncio, base64
+import os, json, asyncio, base64, time
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -111,17 +111,6 @@ def format_elements(meta, limit=120):
     return "\n".join(lines)
 
 
-
-
-def format_recent_actions(meta, limit=10):
-    if not isinstance(meta, dict):
-        return ""
-    recent = meta.get("recentActions")
-    if not isinstance(recent, list):
-        return ""
-    return "\n".join([str(x) for x in recent[:limit]])
-
-
 def format_trimmed_history(meta, limit=5):
     if not isinstance(meta, dict):
         return ""
@@ -131,12 +120,38 @@ def format_trimmed_history(meta, limit=5):
     return "\n".join([str(x) for x in hist[-limit:]])
 
 
+def format_last_action(meta):
+    if not isinstance(meta, dict):
+        return ""
+    last_action = meta.get("lastAction")
+    if not isinstance(last_action, dict):
+        return ""
+    try:
+        return json.dumps(last_action, ensure_ascii=False)
+    except Exception:
+        return ""
+
+
+def format_last_expectation(meta):
+    if not isinstance(meta, dict):
+        return ""
+    last_expectation = meta.get("lastExpectation")
+    if not isinstance(last_expectation, dict):
+        return ""
+    try:
+        return json.dumps(last_expectation, ensure_ascii=False)
+    except Exception:
+        return ""
+
+
 
 
 @app.post("/agent-step")
 def agent_step(req: AgentStep):
     history_text = format_history(req.meta)
     elements_text = format_elements(req.meta)
+    last_action_text = format_last_action(req.meta)
+    last_expectation_text = format_last_expectation(req.meta)
 
 
 
@@ -178,6 +193,8 @@ def agent_step(req: AgentStep):
         f"URL:\n{url}\n\n"
         f"TITLE:\n{title}\n\n"
         f"ACTION_HISTORY:\n{history_text}\n\n"
+        f"LAST_ACTION:\n{last_action_text}\n\n"
+        f"LAST_EXPECTATION:\n{last_expectation_text}\n\n"
         f"ELEMENTS:\n{elements_text}"
     )
 
@@ -185,8 +202,9 @@ def agent_step(req: AgentStep):
 
 
     try:
+        t0 = time.monotonic()
         resp = client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4o-mini",
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": req.controllerPrompt},
@@ -199,6 +217,7 @@ def agent_step(req: AgentStep):
                 },
             ],
         )
+        print(f"[timing] /agent-step openai_ms={int((time.monotonic() - t0) * 1000)}")
         return json.loads(resp.choices[0].message.content)
     except Exception as e:
         print("LLM error:", e)
@@ -211,6 +230,8 @@ def agent_step(req: AgentStep):
 def plan(req: PlanReq):
     history_text = format_history(req.meta)
     elements_text = format_elements(req.meta)
+    last_action_text = format_last_action(req.meta)
+    last_expectation_text = format_last_expectation(req.meta)
 
 
     url = ""
@@ -236,12 +257,15 @@ def plan(req: PlanReq):
         f"URL:\n{url}\n\n"
         f"TITLE:\n{title}\n\n"
         f"ACTION_HISTORY:\n{history_text}\n\n"
+        f"LAST_ACTION:\n{last_action_text}\n\n"
+        f"LAST_EXPECTATION:\n{last_expectation_text}\n\n"
         f"ELEMENTS:\n{elements_text}\n\n"
         f"NOTES:\n{last_error}"
     )
 
 
     try:
+        t0 = time.monotonic()
         resp = client.chat.completions.create(
             model=PLANNER_MODEL,
             response_format={"type": "json_object"},
@@ -256,6 +280,7 @@ def plan(req: PlanReq):
                 },
             ],
         )
+        print(f"[timing] /plan openai_ms={int((time.monotonic() - t0) * 1000)}")
         return json.loads(resp.choices[0].message.content)
     except Exception as e:
         print("LLM error:", e)
@@ -268,7 +293,8 @@ def plan(req: PlanReq):
 def execute_step(req: ExecuteReq):
     history_text = format_history(req.meta)
     elements_text = format_elements(req.meta)
-    recent_text = format_recent_actions(req.meta)
+    last_action_text = format_last_action(req.meta)
+    last_expectation_text = format_last_expectation(req.meta)
 
 
     url = ""
@@ -298,13 +324,15 @@ def execute_step(req: ExecuteReq):
         f"LAST_SUMMARY:\n{last_summary}\n\n"
         f"USER_REPLY:\n{user_reply}\n\n"
         f"ACTION_HISTORY:\n{history_text}\n\n"
-        f"RECENT_ACTIONS:\n{recent_text}\n\n"
+        f"LAST_ACTION:\n{last_action_text}\n\n"
+        f"LAST_EXPECTATION:\n{last_expectation_text}\n\n"
         f"ELEMENTS:\n{elements_text}\n\n"
         f"NOTES:\n{last_error}"
     )
 
 
     try:
+        t0 = time.monotonic()
         resp = client.chat.completions.create(
             model=EXECUTOR_MODEL,
             response_format={"type": "json_object"},
@@ -313,6 +341,7 @@ def execute_step(req: ExecuteReq):
                 {"role": "user", "content": [{"type": "text", "text": user_text}]},
             ],
         )
+        print(f"[timing] /execute-step openai_ms={int((time.monotonic() - t0) * 1000)}")
         return json.loads(resp.choices[0].message.content)
     except Exception as e:
         print("LLM error:", e)
@@ -324,6 +353,7 @@ def execute_step(req: ExecuteReq):
 @app.post("/summarize")
 def summarize(req: SummarizeReq):
     try:
+        t0 = time.monotonic()
         resp = client.chat.completions.create(
             model="gpt-4o",
             response_format={"type": "text"},
@@ -342,6 +372,7 @@ def summarize(req: SummarizeReq):
                 },
             ],
         )
+        print(f"[timing] /summarize openai_ms={int((time.monotonic() - t0) * 1000)}")
         return {"answer": resp.choices[0].message.content}
     except Exception as e:
         print("LLM error:", e)
@@ -376,6 +407,7 @@ Rules:
 @app.post("/intent")
 def intent(req: IntentReq):
     try:
+        t0 = time.monotonic()
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
             response_format={"type": "json_object"},
@@ -384,6 +416,7 @@ def intent(req: IntentReq):
                 {"role": "user", "content": req.text},
             ],
         )
+        print(f"[timing] /intent openai_ms={int((time.monotonic() - t0) * 1000)}")
         return json.loads(resp.choices[0].message.content)
     except Exception as e:
         print("LLM error:", e)
@@ -397,6 +430,8 @@ def status(req: StatusReq):
     page_context = ""
     elements_text = ""
     history_text = ""
+    last_action_text = format_last_action(req.meta)
+    last_expectation_text = format_last_expectation(req.meta)
     if isinstance(req.meta, dict):
         url = req.meta.get("url") or ""
         title = req.meta.get("title") or ""
@@ -410,10 +445,13 @@ def status(req: StatusReq):
         f"TITLE:\n{title}\n\n"
         f"PAGE_CONTEXT:\n{page_context}\n\n"
         f"ACTION_HISTORY:\n{history_text}\n\n"
+        f"LAST_ACTION:\n{last_action_text}\n\n"
+        f"LAST_EXPECTATION:\n{last_expectation_text}\n\n"
         f"ELEMENTS:\n{elements_text}"
     )
 
     try:
+        t0 = time.monotonic()
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
             response_format={"type": "json_object"},
@@ -428,6 +466,7 @@ def status(req: StatusReq):
                 },
             ],
         )
+        print(f"[timing] /status openai_ms={int((time.monotonic() - t0) * 1000)}")
         return json.loads(resp.choices[0].message.content)
     except Exception as e:
         print("LLM error:", e)
@@ -441,6 +480,7 @@ def profile_answer(req: ProfileAnswerReq):
     Returns "UNKNOWN" when the requested info is not present.
     """
     try:
+        t0 = time.monotonic()
         payload = json.dumps({"user_profile": req.user_profile, "question": req.question})
         resp = client.chat.completions.create(
             model=PROFILE_MODEL,
@@ -450,6 +490,7 @@ def profile_answer(req: ProfileAnswerReq):
                 {"role": "user", "content": payload},
             ],
         )
+        print(f"[timing] /profile-answer openai_ms={int((time.monotonic() - t0) * 1000)}")
         answer = (resp.choices[0].message.content or "").strip()
         return {"answer": answer}
     except Exception as e:
