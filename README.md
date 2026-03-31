@@ -1,6 +1,6 @@
-# Cora – Browser Agentic AI
+# Foundational Broswer Agent
 
-Cora is a Chrome-based browser agent that observes web pages, reasons over the DOM + screenshots using OpenAI models, and executes actions such as clicking, typing, and scrolling.
+This project is a Chrome-based browser agent that observes web pages, reasons over the DOM + screenshots using OpenAI models, and executes actions such as clicking, typing, and scrolling.
 
 It combines:
 
@@ -13,7 +13,7 @@ It combines:
 
 # Architecture Overview
 
-Cora consists of two main components:
+This project consists of two main components:
 
 ## 1️⃣ Chrome Extension (Frontend Agent)
 
@@ -155,7 +155,7 @@ pip install fastapi uvicorn openai websockets python-dotenv
 
 ### 2️⃣ Set OpenAI API Key
 
-Cora requires your OpenAI key as an environment variable.
+This project requires your OpenAI key as an environment variable.
 
 **Mac / Linux**
 
@@ -223,7 +223,7 @@ Agent will:
 
 # 🔐 Privacy & Security Notes
 
-Cora uses powerful browser permissions.
+This project uses powerful browser permissions.
 
 ## Permissions Used
 
@@ -238,7 +238,7 @@ Cora uses powerful browser permissions.
 
 ## Screenshot Capture
 
-Cora captures the **visible viewport** when making LLM decisions.
+The system captures the **visible viewport** when making LLM decisions.
 
 Captured data includes:
 
