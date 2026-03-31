@@ -1,5 +1,7 @@
 # Foundational Broswer Agent
 
+https://github.com/user-attachments/assets/57d982c1-28e8-40c6-a546-dc8d0a55112a
+
 This project is a Chrome-based browser agent that observes web pages, reasons over the DOM + screenshots using OpenAI models, and executes actions such as clicking, typing, and scrolling.
 
 It combines:
